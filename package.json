@@ -1,0 +1,11 @@
+{
+  "name": "ball-server",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "@neondatabase/serverless": "^1.0.1"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}
