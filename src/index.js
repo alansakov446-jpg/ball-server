@@ -77,16 +77,21 @@ async function route(req, env, url) {
     return env.ROOM.get(env.ROOM.idFromName(code)).fetch(new Request(req, { headers: h }));
   }
 
+  // Проверка настройки: открой /api/health в браузере. Секретов не показывает, только да/нет и код ошибки.
+  if (path === '/api/health') {
+    const r = { secrets: { BOT_TOKEN: !!env.BOT_TOKEN, DATABASE_URL: !!env.DATABASE_URL, SESSION_SECRET: !!env.SESSION_SECRET, ADMIN_ID: !!env.ADMIN_ID }, db: false, table: false };
+    try {
+      const s0 = neon(env.DATABASE_URL);
+      await s0.query('select 1', []);
+      r.db = true;
+      try { await s0.query('select count(*) from users', []); r.table = true; } catch (e) { r.tableCode = String(e.code || 'error').slice(0, 40); }
+    } catch (e) { r.dbCode = String(e.code || e.name || 'error').slice(0, 40); }
+    return J(r);
+  }
+
   const sql = neon(env.DATABASE_URL);
   const q = (t, p) => sql.query(t, p);
 
-  // Проверка, что сервер настроен: открой /api/health в браузере. Секретов и ключей не показывает, только да/нет.
-  if (path === '/api/health') {
-    const r = { secrets: { BOT_TOKEN: !!env.BOT_TOKEN, DATABASE_URL: !!env.DATABASE_URL, SESSION_SECRET: !!env.SESSION_SECRET, ADMIN_ID: !!env.ADMIN_ID }, db: false, table: false };
-    try { await q('select 1', []); r.db = true; } catch (e) { r.dbCode = String(e.code || e.name || 'error').slice(0, 40); }
-    if (r.db) { try { await q('select count(*) from users', []); r.table = true; } catch (e) { r.tableCode = String(e.code || 'error').slice(0, 40); } }
-    return J(r);
-  }
 
   if (path === '/api/auth' && req.method === 'POST') {
     const body = await req.json().catch(() => ({}));
@@ -179,7 +184,7 @@ export default {
       return new Response(r.body, { status: r.status, headers: h });
     } catch (e) {
       console.error(e);
-      return new Response(JSON.stringify({ error: 'server' }), { status: 500, headers: { ...cors, 'content-type': 'application/json' } });
+      return new Response(JSON.stringify({ error: 'server', code: String((e && (e.code || e.name)) || '').slice(0, 40) }), { status: 500, headers: { ...cors, 'content-type': 'application/json' } });
     }
   },
 };
@@ -222,4 +227,4 @@ export class Room {
     else rest.forEach((o) => o.send(JSON.stringify({ t: 'leave', s: a.slot })));
   }
   webSocketError(ws) { this.webSocketClose(ws); }
-}
+  }
