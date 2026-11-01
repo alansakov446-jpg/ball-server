@@ -67,8 +67,14 @@ async function route(req, env, url) {
   if (path.startsWith('/ws/')) {
     const code = path.slice(4);
     if (!/^[A-Z0-9]{4,8}$/.test(code)) return J({ error: 'code' }, 400);
-    if (!(await check(url.searchParams.get('t'), env.SESSION_SECRET))) return J({ error: 'auth' }, 401);
-    return env.ROOM.get(env.ROOM.idFromName(code)).fetch(req);
+    const sess0 = await check(url.searchParams.get('t'), env.SESSION_SECRET);
+    if (!sess0) return J({ error: 'auth' }, 401);
+    const rows = await neon(env.DATABASE_URL).query('select nick, nick_color from users where tg_id = $1', [sess0.id]);
+    const h = new Headers(req.headers);
+    h.set('x-nick', encodeURIComponent((rows[0] && rows[0].nick) || 'Игрок'));
+    h.set('x-color', (rows[0] && rows[0].nick_color) || '');
+    h.set('x-join', url.searchParams.get('j') ? '1' : '');
+    return env.ROOM.get(env.ROOM.idFromName(code)).fetch(new Request(req, { headers: h }));
   }
 
   const sql = neon(env.DATABASE_URL);
@@ -170,27 +176,42 @@ export default {
   },
 };
 
-// Комната для двух игроков: просто пересылает сообщения от одного к другому.
+// Комната до 5 игроков. Первый вошедший становится хостом (он считает игру), остальные шлют ему ввод.
+// Каждое сообщение пересылается остальным в обёртке {"f":номер_места,"d":сообщение}.
 export class Room {
   constructor(state) { this.state = state; }
   async fetch(req) {
     if (req.headers.get('Upgrade') !== 'websocket') return new Response('expected websocket', { status: 426 });
     const socks = this.state.getWebSockets();
-    if (socks.length >= 2) return new Response('room full', { status: 409 });
-    const roles = socks.flatMap((w) => this.state.getTags(w));
-    const role = roles.includes('host') ? 'guest' : 'host';
+    if (req.headers.get('x-join') && socks.length === 0) return new Response('no room', { status: 404 });
+    if (socks.length >= 5) return new Response('room full', { status: 409 });
+    const att = socks.map((w) => w.deserializeAttachment() || {});
+    let slot = 0;
+    while (att.some((a) => a.slot === slot)) slot++;
+    const host = !att.some((a) => a.host);
+    let nick = '';
+    try { nick = decodeURIComponent(req.headers.get('x-nick') || ''); } catch { nick = ''; }
+    nick = (nick || 'Игрок').slice(0, 16);
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    this.state.acceptWebSocket(server, [role]);
-    server.send(JSON.stringify({ t: 'hello', role, peers: socks.length + 1 }));
-    socks.forEach((o) => o.send(JSON.stringify({ t: 'join' })));
+    this.state.acceptWebSocket(server);
+    server.serializeAttachment({ slot, host, nick });
+    const roster = att.concat([{ slot, host, nick }]).map((a) => ({ s: a.slot, n: a.nick, h: a.host ? 1 : 0 }));
+    server.send(JSON.stringify({ t: 'hello', slot, host, roster }));
+    socks.forEach((o) => o.send(JSON.stringify({ t: 'join', s: slot, n: nick })));
     return new Response(null, { status: 101, webSocket: client });
   }
   webSocketMessage(ws, msg) {
-    if (typeof msg !== 'string' || msg.length > 2000) return;
-    this.state.getWebSockets().forEach((o) => { if (o !== ws) o.send(msg); });
+    if (typeof msg !== 'string' || msg.length > 6000 || msg[0] !== '{') return;
+    const a = ws.deserializeAttachment() || {};
+    const out = '{"f":' + a.slot + ',"d":' + msg + '}';
+    this.state.getWebSockets().forEach((o) => { if (o !== ws) o.send(out); });
   }
   webSocketClose(ws) {
-    this.state.getWebSockets().forEach((o) => { if (o !== ws) o.send(JSON.stringify({ t: 'leave' })); });
+    const a = ws.deserializeAttachment() || {};
+    const rest = this.state.getWebSockets().filter((o) => o !== ws);
+    if (a.host) rest.forEach((o) => { try { o.close(1000, 'host left'); } catch (e) {} });
+    else rest.forEach((o) => o.send(JSON.stringify({ t: 'leave', s: a.slot })));
   }
-}
+  webSocketError(ws) { this.webSocketClose(ws); }
+                                                                                   }
